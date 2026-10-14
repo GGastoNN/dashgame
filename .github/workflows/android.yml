@@ -72,62 +72,67 @@ jobs:
             -dname 'CN=Android Debug,O=Blue Dash,C=US'
           test -s "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
 
-      - name: Configurar Godot para exportar Android
+      - name: Importar recursos y crear preferencias de Godot
         shell: bash
         run: |
           set -euo pipefail
-          test -f project.godot
-          test -f export_presets.cfg
+          godot --headless --path . --editor --import --quit
+
+      - name: Configurar Android SDK JDK y firma en Godot 4.4
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import os
           import re
           from pathlib import Path
 
-          settings = Path.home() / '.config/godot/editor_settings-4.tres'
-          settings.parent.mkdir(parents=True, exist_ok=True)
-          content = settings.read_text() if settings.exists() else '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
-          if '[resource]' not in content:
-              raise SystemExit('Configuracion del editor invalida: falta [resource]')
-          for key, value in {
-              'export/android/android_sdk_path': os.environ['ANDROID_HOME'],
-              'export/android/java_sdk_path': os.environ['JAVA_HOME'],
-          }.items():
-              line = f'{key} = "{value}"'
-              if re.search(rf'(?m)^{re.escape(key)}\s*=', content):
-                  content = re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', lambda _: line, content)
-              else:
-                  content = content.rstrip() + '\n' + line + '\n'
-          settings.write_text(content)
+          # Godot 4.4 usa editor_settings-4.4.tres, NO editor_settings-4.tres.
+          settings = Path.home() / '.config/godot/editor_settings-4.4.tres'
+          if not settings.exists():
+              raise SystemExit(f'Godot no genero las preferencias: {settings}')
+          data = settings.read_text()
+          if '[resource]' not in data:
+              raise SystemExit(f'Preferencias invalidas: {settings}')
 
-          preset_file = Path('export_presets.cfg')
-          preset = preset_file.read_text()
-          section = '[preset.0.options]'
-          if 'name="Android"' not in preset or section not in preset:
-              raise SystemExit('No existe un preset Android en export_presets.cfg')
-          # Configuracion explicita para firmar el APK de depuracion.
+          def update_tres(text, key, value):
+              line = f'{key} = "{value}"'
+              pattern = rf'(?m)^{re.escape(key)}\s*=.*$'
+              if re.search(pattern, text):
+                  return re.sub(pattern, lambda _: line, text)
+              return text.rstrip() + '\n' + line + '\n'
+
+          data = update_tres(data, 'export/android/android_sdk_path', os.environ['ANDROID_HOME'])
+          data = update_tres(data, 'export/android/java_sdk_path', os.environ['JAVA_HOME'])
+          settings.write_text(data)
+          print('Editor settings:', settings)
+          print('Android SDK:', os.environ['ANDROID_HOME'])
+          print('Java SDK:', os.environ['JAVA_HOME'])
+
+          preset_path = Path('export_presets.cfg')
+          preset = preset_path.read_text()
+          if 'name="Android"' not in preset or '[preset.0.options]' not in preset:
+              raise SystemExit('No existe el preset Android esperado')
+          # Modificamos solamente la seccion de opciones del preset Android.
           updates = {
-              'package/signed': 'true',
               'keystore/debug': '"' + os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'] + '"',
               'keystore/debug_user': '"androiddebugkey"',
               'keystore/debug_password': '"android"',
+              'package/signed': 'true',
           }
           for key, value in updates.items():
               line = f'{key}={value}'
-              if re.search(rf'(?m)^{re.escape(key)}=', preset):
-                  preset = re.sub(rf'(?m)^{re.escape(key)}=.*$', lambda _: line, preset)
+              pattern = rf'(?m)^{re.escape(key)}=.*$'
+              if re.search(pattern, preset):
+                  preset = re.sub(pattern, lambda _: line, preset)
               else:
                   preset = preset.rstrip() + '\n' + line + '\n'
-          preset_file.write_text(preset)
-          print('Android SDK:', os.environ['ANDROID_HOME'])
-          print('Java SDK:', os.environ['JAVA_HOME'])
-          print('Firma debug:', os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'])
+          preset_path.write_text(preset)
+          print('Preset de Android y clave debug configurados')
           PY
-
-      - name: Importar y verificar recursos
-        shell: bash
-        run: |
-          set -euo pipefail
-          godot --headless --path . --editor --import --quit
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -f "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -s "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
 
       - name: Exportar APK con diagnostico
         shell: bash

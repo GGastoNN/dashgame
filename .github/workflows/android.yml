@@ -1,4 +1,6 @@
+
 name: Compilar APK Android
+
 on:
   workflow_dispatch:
   push:
@@ -7,47 +9,145 @@ on:
 jobs:
   android:
     runs-on: ubuntu-22.04
+
     permissions:
       contents: read
+
     env:
-      GODOT_VERSION: '4.4.1'
+      GODOT_VERSION: "4.4.1"
       GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
       GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
       GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'      
-      - name: Instalar SDK Android
+          java-version: "17"
+
+      - name: Instalar Android SDK
+        shell: bash
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Descargar Godot y plantillas de exportación
+          set -e
+
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager -print -quit 2>/dev/null || true)
+
+          if [ -z "$SDKMANAGER" ]; then
+            wget -q \
+              "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+              -O /tmp/cmdline-tools.zip
+
+            mkdir -p /tmp/android-cmdline
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/android-cmdline
+
+            mkdir -p "$ANDROID_HOME/cmdline-tools/latest"
+            cp -a /tmp/android-cmdline/cmdline-tools/. \
+              "$ANDROID_HOME/cmdline-tools/latest/"
+
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          chmod +x "$SDKMANAGER"
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses
+          set -o pipefail
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Descargar Godot 4.4.1
+        shell: bash
         run: |
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          set -e
+
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+
           unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+
           chmod +x "Godot_v${GODOT_VERSION}-stable_linux.x86_64"
-          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
-          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
-          unzip -qo "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d /tmp/godot-templates
-          mv /tmp/godot-templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
-      - name: Crear clave de depuración
+
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" \
+            /usr/local/bin/godot
+
+          godot --headless --version
+
+      - name: Instalar plantillas de exportacion
+        shell: bash
         run: |
-          keytool -genkeypair -noprompt -v -keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android Debug,O=Blue Dash,C=US'
-      - name: Importar y validar proyecto
+          set -e
+
+          wget -q \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
+            -O /tmp/export_templates.tpz
+
+          mkdir -p /tmp/godot-templates
+
+          unzip -q /tmp/export_templates.tpz \
+            -d /tmp/godot-templates
+
+          mkdir -p \
+            "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+          cp -a /tmp/godot-templates/templates/. \
+            "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+
+      - name: Crear clave Android Debug
+        shell: bash
         run: |
+          keytool -genkeypair \
+            -noprompt \
+            -v \
+            -keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH" \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Blue Dash,C=US"
+
+      - name: Importar proyecto Godot
+        shell: bash
+        run: |
+          set -e
           godot --headless --path . --editor --import --quit
-      - name: Exportar APK
+
+      - name: Compilar APK Android
+        shell: bash
         run: |
+          set -e
+
           mkdir -p build
-          godot --headless --path . --export-debug Android build/BlueDash.apk
+
+          godot --headless --path . \
+            --export-debug "Android" "build/BlueDash.apk"
+
           test -s build/BlueDash.apk
-      - name: Descargar APK desde Actions
+
+          echo "APK generado correctamente"
+          ls -lh build/BlueDash.apk
+
+      - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
           name: BlueDash-Android-APK
           path: build/BlueDash.apk
           if-no-files-found: error
+          retention-days: 30

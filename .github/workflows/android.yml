@@ -26,13 +26,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Android SDK
+      - name: Preparar Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
           if [ -z "$SDKMANAGER" ]; then
             wget -q 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip' -O /tmp/cmdline-tools.zip
             mkdir -p "$RUNNER_TEMP/android-cmdline" "$ANDROID_HOME/cmdline-tools/latest"
@@ -43,88 +43,115 @@ jobs:
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
-            'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+            'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' \
+            'platforms;android-34' 'build-tools;34.0.0'
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
-      - name: Descargar Godot 4.4.1
+      - name: Instalar Godot y plantillas
         shell: bash
         run: |
-          set -e
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          chmod +x "Godot_v${GODOT_VERSION}-stable_linux.x86_64"
-          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          set -euo pipefail
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" -O /tmp/godot.zip
+          unzip -qo /tmp/godot.zip -d /tmp
+          chmod +x "/tmp/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          sudo mv "/tmp/Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -O /tmp/export_templates.tpz
+          mkdir -p /tmp/godot-templates "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          unzip -qo /tmp/export_templates.tpz -d /tmp/godot-templates
+          cp -a /tmp/godot-templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
           godot --headless --version
 
-      - name: Instalar plantillas de exportacion
+      - name: Crear firma de depuracion
         shell: bash
         run: |
-          set -e
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -O /tmp/export_templates.tpz
-          mkdir -p /tmp/godot-templates
-          unzip -q /tmp/export_templates.tpz -d /tmp/godot-templates
-          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
-          cp -a /tmp/godot-templates/templates/. "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
-
-      - name: Crear clave Android Debug
-        shell: bash
-        run: |
-          keytool -genkeypair -noprompt -v \
-            -keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH" \
+          set -euo pipefail
+          keytool -genkeypair -noprompt -keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH" \
             -storepass android -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname 'CN=Android Debug,O=Blue Dash,C=US'
+          test -s "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
 
-      - name: Importar proyecto Godot
+      - name: Configurar Godot para exportar Android
         shell: bash
         run: |
-          set -e
-          godot --headless --path . --editor --import --quit
-
-      - name: Configurar SDK y JDK en Godot
-        shell: bash
-        run: |
-          set -e
+          set -euo pipefail
+          test -f project.godot
+          test -f export_presets.cfg
           python3 - <<'PY'
           import os
+          import re
           from pathlib import Path
 
           settings = Path.home() / '.config/godot/editor_settings-4.tres'
           settings.parent.mkdir(parents=True, exist_ok=True)
-          data = settings.read_text() if settings.exists() else '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
-          if '[resource]' not in data:
-              raise SystemExit(f'No se encuentra [resource] en {settings}')
-          import re
+          content = settings.read_text() if settings.exists() else '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
+          if '[resource]' not in content:
+              raise SystemExit('Configuracion del editor invalida: falta [resource]')
           for key, value in {
               'export/android/android_sdk_path': os.environ['ANDROID_HOME'],
               'export/android/java_sdk_path': os.environ['JAVA_HOME'],
           }.items():
               line = f'{key} = "{value}"'
-              if re.search(rf'(?m)^{re.escape(key)}\s*=', data):
-                  data = re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', lambda _: line, data)
+              if re.search(rf'(?m)^{re.escape(key)}\s*=', content):
+                  content = re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', lambda _: line, content)
               else:
-                  data = data.rstrip() + '\n' + line + '\n'
-          settings.write_text(data)
-          print('Godot Android SDK:', os.environ['ANDROID_HOME'])
-          print('Godot Java SDK:', os.environ['JAVA_HOME'])
-          print('Editor settings:', settings)
-          PY
-          test -f export_presets.cfg
+                  content = content.rstrip() + '\n' + line + '\n'
+          settings.write_text(content)
 
-      - name: Compilar APK Android
+          preset_file = Path('export_presets.cfg')
+          preset = preset_file.read_text()
+          section = '[preset.0.options]'
+          if 'name="Android"' not in preset or section not in preset:
+              raise SystemExit('No existe un preset Android en export_presets.cfg')
+          # Configuracion explicita para firmar el APK de depuracion.
+          updates = {
+              'package/signed': 'true',
+              'keystore/debug': '"' + os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'] + '"',
+              'keystore/debug_user': '"androiddebugkey"',
+              'keystore/debug_password': '"android"',
+          }
+          for key, value in updates.items():
+              line = f'{key}={value}'
+              if re.search(rf'(?m)^{re.escape(key)}=', preset):
+                  preset = re.sub(rf'(?m)^{re.escape(key)}=.*$', lambda _: line, preset)
+              else:
+                  preset = preset.rstrip() + '\n' + line + '\n'
+          preset_file.write_text(preset)
+          print('Android SDK:', os.environ['ANDROID_HOME'])
+          print('Java SDK:', os.environ['JAVA_HOME'])
+          print('Firma debug:', os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'])
+          PY
+
+      - name: Importar y verificar recursos
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          godot --headless --path . --editor --import --quit
+
+      - name: Exportar APK con diagnostico
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p build
-          godot --headless --path . --export-debug 'Android' build/BlueDash.apk
+          godot --headless --verbose --path . --export-debug Android build/BlueDash.apk 2>&1 | tee build/export.log
           test -s build/BlueDash.apk
           ls -lh build/BlueDash.apk
 
       - name: Publicar APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: BlueDash-Android-APK
           path: build/BlueDash.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publicar diagnostico si falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueDash-Logs-Android
+          path: build/export.log
+          if-no-files-found: ignore
+          retention-days: 7

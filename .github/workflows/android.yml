@@ -32,18 +32,16 @@ jobs:
           set -e
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)
           if [ -z "$SDKMANAGER" ]; then
-            wget -q "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -O /tmp/cmdline-tools.zip
-            mkdir -p /tmp/android-cmdline
-            unzip -q /tmp/cmdline-tools.zip -d /tmp/android-cmdline
-            mkdir -p "$ANDROID_HOME/cmdline-tools/latest"
-            cp -a /tmp/android-cmdline/cmdline-tools/. "$ANDROID_HOME/cmdline-tools/latest/"
+            wget -q 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip' -O /tmp/cmdline-tools.zip
+            mkdir -p "$RUNNER_TEMP/android-cmdline" "$ANDROID_HOME/cmdline-tools/latest"
+            unzip -q /tmp/cmdline-tools.zip -d "$RUNNER_TEMP/android-cmdline"
+            cp -a "$RUNNER_TEMP/android-cmdline/cmdline-tools/." "$ANDROID_HOME/cmdline-tools/latest/"
             SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           fi
           test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null || true
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
             'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
@@ -81,14 +79,45 @@ jobs:
       - name: Importar proyecto Godot
         shell: bash
         run: |
+          set -e
           godot --headless --path . --editor --import --quit
+
+      - name: Configurar SDK y JDK en Godot
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          settings = Path.home() / '.config/godot/editor_settings-4.tres'
+          settings.parent.mkdir(parents=True, exist_ok=True)
+          data = settings.read_text() if settings.exists() else '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
+          if '[resource]' not in data:
+              raise SystemExit(f'No se encuentra [resource] en {settings}')
+          import re
+          for key, value in {
+              'export/android/android_sdk_path': os.environ['ANDROID_HOME'],
+              'export/android/java_sdk_path': os.environ['JAVA_HOME'],
+          }.items():
+              line = f'{key} = "{value}"'
+              if re.search(rf'(?m)^{re.escape(key)}\s*=', data):
+                  data = re.sub(rf'(?m)^{re.escape(key)}\s*=.*$', lambda _: line, data)
+              else:
+                  data = data.rstrip() + '\n' + line + '\n'
+          settings.write_text(data)
+          print('Godot Android SDK:', os.environ['ANDROID_HOME'])
+          print('Godot Java SDK:', os.environ['JAVA_HOME'])
+          print('Editor settings:', settings)
+          PY
+          test -f export_presets.cfg
 
       - name: Compilar APK Android
         shell: bash
         run: |
           set -e
           mkdir -p build
-          godot --headless --path . --export-debug Android build/BlueDash.apk
+          godot --headless --path . --export-debug 'Android' build/BlueDash.apk
           test -s build/BlueDash.apk
           ls -lh build/BlueDash.apk
 

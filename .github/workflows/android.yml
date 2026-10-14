@@ -12,9 +12,9 @@ jobs:
       contents: read
     env:
       GODOT_VERSION: '4.4.1'
-      GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
       GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
       GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+      GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
 
     steps:
       - name: Descargar repositorio
@@ -26,44 +26,44 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Android SDK
+      - name: Preparar Android SDK
         shell: bash
         run: |
           set -euo pipefail
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
           if [ -z "$SDKMANAGER" ]; then
-            wget -q 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip' -O "$RUNNER_TEMP/cmdline-tools.zip"
-            mkdir -p "$RUNNER_TEMP/android-tools" "$ANDROID_HOME/cmdline-tools/latest"
-            unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP/android-tools"
-            cp -a "$RUNNER_TEMP/android-tools/cmdline-tools/." "$ANDROID_HOME/cmdline-tools/latest/"
-            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O "$RUNNER_TEMP/android-tools.zip"
+            mkdir -p "$RUNNER_TEMP/android-tools" "$SDK/cmdline-tools/latest"
+            unzip -q "$RUNNER_TEMP/android-tools.zip" -d "$RUNNER_TEMP/android-tools"
+            cp -a "$RUNNER_TEMP/android-tools/cmdline-tools/." "$SDK/cmdline-tools/latest/"
+            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
           fi
           test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK" \
             'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' \
-            'platforms;android-34' 'build-tools;34.0.0' \
-            'cmake;3.10.2.4988404' 'ndk;23.2.8568313'
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+            'platforms;android-34' 'build-tools;34.0.0'
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: Instalar Godot y plantillas
+      - name: Descargar Godot y plantillas
         shell: bash
         run: |
           set -euo pipefail
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" -O "$RUNNER_TEMP/godot.zip"
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+          wget -q "$BASE/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" -O "$RUNNER_TEMP/godot.zip"
           unzip -qo "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP"
           chmod +x "$RUNNER_TEMP/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
           sudo mv "$RUNNER_TEMP/Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
-          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -O "$RUNNER_TEMP/templates.tpz"
+          wget -q "$BASE/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -O "$RUNNER_TEMP/templates.tpz"
           mkdir -p "$RUNNER_TEMP/templates" "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
           unzip -qo "$RUNNER_TEMP/templates.tpz" -d "$RUNNER_TEMP/templates"
           cp -a "$RUNNER_TEMP/templates/templates/." "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
           test -s "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_debug.apk"
           godot --headless --version
 
-      - name: Crear keystore debug
+      - name: Crear firma Android de depuracion
         shell: bash
         run: |
           set -euo pipefail
@@ -72,15 +72,16 @@ jobs:
             -storepass android -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname 'CN=Android Debug,O=Blue Dash,C=US'
+          test -s "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
 
-      - name: Importar recursos
+      - name: Importar recursos del juego
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build
           godot --headless --path . --editor --import --quit 2>&1 | tee build/import.log
 
-      - name: Configurar preferencias y preset Android
+      - name: Configurar preferencias y crear preset limpio
         shell: bash
         run: |
           set -euo pipefail
@@ -90,75 +91,97 @@ jobs:
           from pathlib import Path
 
           settings = Path.home() / '.config/godot/editor_settings-4.4.tres'
-          if not settings.is_file():
-              raise SystemExit(f'No existe configuracion de Godot: {settings}')
-          data = settings.read_text()
-          if '[resource]' not in data:
-              raise SystemExit('Las preferencias de Godot no tienen la seccion [resource]')
+          if not settings.exists():
+              raise SystemExit(f'No existe la configuracion del editor: {settings}')
+          original = settings.read_text()
+          if '[resource]' not in original:
+              raise SystemExit('Archivo de preferencias Godot sin [resource]')
 
-          # Insertar las propiedades dentro de [resource].
-          for key, value in {
+          # Mantener las preferencias de Godot y actualizar las claves correctas.
+          values = {
               'export/android/android_sdk_path': os.environ['ANDROID_HOME'],
               'export/android/java_sdk_path': os.environ['JAVA_HOME'],
-          }.items():
-              data = re.sub(rf'(?m)^{re.escape(key)}\s*=.*(?:\n|$)', '', data)
+              'export/android/debug_keystore': os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'],
+              'export/android/debug_keystore_user': 'androiddebugkey',
+              'export/android/debug_keystore_pass': 'android',
+          }
+          data = original
+          for key, value in values.items():
+              pattern = rf'(?m)^{re.escape(key)}\s*=.*(?:\n|$)'
+              data = re.sub(pattern, '', data)
               data = data.replace('[resource]\n', f'[resource]\n{key} = "{value}"\n', 1)
           settings.write_text(data)
 
-          preset_file = Path('export_presets.cfg')
-          preset = preset_file.read_text()
-          if 'name="Android"' not in preset or '[preset.0.options]' not in preset:
-              raise SystemExit('No se encontro el preset Android')
-          updates = {
-              'keystore/debug': os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'],
-              'keystore/debug_user': 'androiddebugkey',
-              'keystore/debug_password': 'android',
-          }
-          # Ajustar exclusivamente la seccion de opciones del preset 0.
-          head, options = preset.split('[preset.0.options]', 1)
-          for key, value in updates.items():
-              line = f'{key}="{value}"'
-              pattern = rf'(?m)^{re.escape(key)}\s*=.*$'
-              if re.search(pattern, options):
-                  options = re.sub(pattern, lambda _: line, options)
-              else:
-                  options = options.rstrip() + '\n' + line + '\n'
-          preset_file.write_text(head + '[preset.0.options]' + options)
-          print('SDK:', os.environ['ANDROID_HOME'])
-          print('JDK:', os.environ['JAVA_HOME'])
-          print('Editor:', settings)
-          print('Preset: export_presets.cfg')
+          # Regenerar el preset del runner para descartar opciones viejas/no compatibles.
+          preset = '''[preset.0]
+          name="Android"
+          platform="Android"
+          runnable=true
+          advanced_options=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path="build/BlueDash.apk"
+          patches=PackedStringArray()
+
+          [preset.0.options]
+          custom_template/debug=""
+          custom_template/release=""
+          gradle_build/use_gradle_build=false
+          architectures/armeabi-v7a=false
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+          package/unique_name="org.bluedash.runner"
+          package/name="Blue Dash"
+          package/signed=true
+          package/version_code=1
+          package/version_name="1.0"
+          keystore/debug="{keystore}"
+          keystore/debug_user="androiddebugkey"
+          keystore/debug_password="android"
+          '''.format(keystore=os.environ['GODOT_ANDROID_KEYSTORE_DEBUG_PATH'])
+          Path('export_presets.cfg').write_text(preset)
+          print('Preferencias Godot:', settings)
+          print('Android SDK:', os.environ['ANDROID_HOME'])
+          print('Java SDK:', os.environ['JAVA_HOME'])
+          print('Preset Android regenerado')
           PY
 
-      - name: Registrar diagnostico de configuracion
+      - name: Registrar diagnostico
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          mkdir -p build
           {
-            echo '=== GODOT ==='
+            echo '=== VERSION ==='
             godot --headless --version
-            echo '=== ANDROID Y JAVA ==='
+            echo '=== SDK ==='
             echo "ANDROID_HOME=$ANDROID_HOME"
             echo "JAVA_HOME=$JAVA_HOME"
-            ls -l "$ANDROID_HOME/platform-tools/adb" "$ANDROID_HOME/build-tools/35.0.0/aapt2"
-            ls -l "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_debug.apk"
-            echo '=== PREFERENCIAS RELEVANTES ==='
-            grep -E '^export/android/(android_sdk_path|java_sdk_path)' "$HOME/.config/godot/editor_settings-4.4.tres" || true
-            echo '=== OPCIONES DEL PRESET (sin contrasenas) ==='
-            grep -E '^(name|platform|package/unique_name|package/signed|keystore/debug_user|gradle_build/use_gradle_build)=' export_presets.cfg || true
-            echo '=== OTRAS HERRAMIENTAS ==='
-            find "$ANDROID_HOME" -maxdepth 4 -name apksigner -o -name zipalign | head -20
-          } 2>&1 | tee build/config-diagnostic.log
+            ls -l "$ANDROID_HOME/platforms/android-35/android.jar" || true
+            ls -l "$ANDROID_HOME/build-tools/35.0.0/aapt2" || true
+            echo '=== PLANTILLAS ==='
+            ls -lh "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_debug.apk" || true
+            echo '=== PREFERENCIAS (SIN CONTRASENAS) ==='
+            grep -E '^export/android/(android_sdk_path|java_sdk_path|debug_keystore) =' "$HOME/.config/godot/editor_settings-4.4.tres" || true
+            echo '=== PRESET (SIN CONTRASENAS) ==='
+            grep -E '^((name|platform|package/unique_name|keystore/debug|gradle_build/use_gradle_build)=)' export_presets.cfg | grep -v password || true
+          } > build/config-diagnostic.log 2>&1
+          cat build/config-diagnostic.log
 
-      - name: Exportar APK
+      - name: Compilar BlueDash APK
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p build
           godot --headless --verbose --path . --export-debug Android build/BlueDash.apk 2>&1 | tee build/export.log
           test -s build/BlueDash.apk
           ls -lh build/BlueDash.apk
 
-      - name: Publicar APK
+      - name: Subir APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -167,7 +190,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publicar diagnosticos si falla
+      - name: Subir diagnosticos si falla
         if: failure()
         uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,54 @@
+name: Compilar APK Android
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  android:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      GODOT_VERSION: '4.4.1'
+      GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
+      GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+      GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Instalar SDK Android
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Descargar Godot y plantillas de exportación
+        run: |
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          chmod +x "Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          unzip -qo "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d /tmp/godot-templates
+          mv /tmp/godot-templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/"
+      - name: Crear clave de depuración
+        run: |
+          keytool -genkeypair -noprompt -v -keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Android Debug,O=Blue Dash,C=US'
+      - name: Importar y validar proyecto
+        run: |
+          godot --headless --path . --editor --import --quit
+      - name: Exportar APK
+        run: |
+          mkdir -p build
+          godot --headless --path . --export-debug Android build/BlueDash.apk
+          test -s build/BlueDash.apk
+      - name: Descargar APK desde Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueDash-Android-APK
+          path: build/BlueDash.apk
+          if-no-files-found: error
